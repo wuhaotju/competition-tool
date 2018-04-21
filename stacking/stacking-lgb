@@ -1,0 +1,452 @@
+# -*- coding: UTF-8 -*-
+from sklearn.cross_validation import KFold
+import pandas as pd
+import numpy as np
+from scipy import sparse
+import xgboost
+import lightgbm
+import random
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier, \
+    ExtraTreesClassifier
+from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor, GradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.multiclass import OneVsRestClassifier
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.svm import LinearSVC, SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import log_loss, mean_absolute_error, mean_squared_error
+from sklearn import preprocessing
+from sklearn.preprocessing import MinMaxScaler, Normalizer, StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, HashingVectorizer
+from sklearn.naive_bayes import MultinomialNB, GaussianNB
+
+a = 0.65236
+b = 35.6339
+
+a1 = 0.886429933901
+b1 = 33.7338515207
+
+a2 = 0.757546152448
+b2 = 23.0522742968
+
+a3 = 0.708384297278
+b3 = 19.9145982725
+
+a4 = 0.8256411669
+b4 = 29.2263017215
+
+a5 = 0.735076483208
+b5 = 19.3139758324
+
+age_a = 31.5895814697
+age_b = 1274.60667472
+
+res_a = 202.153145055
+res_b = 7070.53936983
+
+pos_con_a = 0.57895
+pos_con_b = 35.294455
+
+
+def small_date(data):
+    col = data.columns
+    for name in col:
+        if (name.find('ratio') != -1):
+            print (data[data[name] == np.inf][name])
+            data[name] = data[name].map(lambda x: (int)(x * 1000))
+    return data
+
+
+def BayesianSmoothing(data):
+    data['pos_click_ratio'] = (data['pos_click_use'] + a) / (data['pos_click'] + a + b)
+
+    data['creative_click_ratio'] = (data['creative_click_use'] + a1) / (data['creative_click'] + a1 + b1)
+
+    data['cam_click_ratio'] = (data['cam_click_use'] + a2) / (data['cam_click'] + a2 + b2)
+
+    data['advertiser_click_ratio'] = (data['advertiser_click_use'] + a3) / (data['advertiser_click'] + a3 + b3)
+
+    data['ad_click_ratio'] = (data['ad_click_use'] + a4) / (data['ad_click'] + a4 + b4)
+
+    data['app_click_ratio'] = (data['app_click_use'] + a5) / (data['app_click'] + a5 + b5)
+
+    data['age_ratio'] = (data['age_click_use'] + age_a) / (data['age_click'] + age_a + age_b)
+
+    data['residence_ratio'] = (data['residence_click_use'] + res_a) / (data['residence_click'] + res_a + res_b)
+
+    data['rank'] = data['user_day_click_this_creativeID'] - data['user_day_this_creativeID_rank1']
+    del data['app_number']
+    del data['userID']
+    return data
+
+
+##############################################################分类####################################################
+def stacking(clf, train_x, train_y, test_x, clf_name, class_num=1):
+    train = np.zeros((train_x.shape[0], class_num))
+    # 保存每一折train部分的结果
+    test = np.zeros((test_x.shape[0], class_num))
+    # 保存每一折对test预测的结果
+    test_pre = np.empty((folds, test_x.shape[0], class_num))
+    # 将N折对test预测的结果全部存在列表里面
+    cv_scores = []
+    for i, (train_index, test_index) in enumerate(kf):
+        # print('处理第'+str(i)+'份数据')
+        tr_x = train_x[train_index]
+        tr_y = train_y[train_index]
+        te_x = train_x[test_index]
+        te_y = train_y[test_index]
+        if clf_name in ["rf", "ada", "gb", "et", "lr", "knn", "mnb", "ovr", "gnb"]:
+            # print('第'+str(i)+'份数据开始训练'+'模型')
+            clf.fit(tr_x, tr_y)
+            # print('第'+str(i)+'份数据训练'+'模型完成')
+            # print('第'+str(i)+'份数据训练'+'模型开始预测第N折数据')
+            pre = clf.predict_proba(te_x)[:, 1].reshape(-1, class_num)
+            # print('第'+str(i)+'份数据训练'+'模型第N折数据预测完成')
+            train[test_index] = pre
+            # print('第'+str(i)+'份数据训练'+'模型第N折数据填充矩阵完成')
+            # print('第'+str(i)+'份数据训练'+'预测测试集')
+            test_pre[i, :] = clf.predict_proba(test_x)[:, 1].reshape(-1, class_num)
+            # print('第'+str(i)+'份数据训练'+'预测测试集完成')
+            cv_scores.append(log_loss(te_y, pre))
+        elif clf_name in ["lsvc"]:
+            clf.fit(tr_x, tr_y)
+            pre = clf.decision_function(te_x).reshape(-1, class_num)
+            train[test_index] = pre
+            test_pre[i, :] = clf.decision_function(test_x).reshape(-1, class_num)
+            cv_scores.append(log_loss(te_y, pre))
+        elif clf_name in ["xgb"]:
+            # print('第'+str(i)+'份数据开始训练'+'模型')
+            train_matrix = clf.DMatrix(tr_x, label=tr_y, missing=-1)
+            test_matrix = clf.DMatrix(te_x, label=te_y, missing=-1)
+            z = clf.DMatrix(test_x, label=te_y, missing=-1)
+            param = {
+                'objective': 'binary:logistic',
+                'eta': 0.05,
+                'colsample_bytree': 0.8,
+                # 'min_child_weight': 2,cd
+                # 'max_depth': 8,0
+                'subsample': 0.8,
+                # 'alpha': 10,
+                # 'gamma': 30,
+                # 'lambda': 5,
+                'silent': 1,
+                'verbose_eval': True,
+                # 'nthread': 8,
+                'eval_metric': 'logloss',
+                # 'scale_pos_weight': 10,
+                'seed': 201703,
+                'missing': -1
+            }
+            num_round = 3000
+            early_stopping_rounds = 100
+            # print('参数列表：')
+            print(param)
+            print('num_round = ' + str(num_round) + '   ' + 'early_stopping_rounds = ' + str(early_stopping_rounds))
+            watchlist = [(train_matrix, 'train'),
+                         (test_matrix, 'eval')
+                         ]
+            if test_matrix:
+                model = clf.train(param, train_matrix, num_boost_round=num_round)
+                # evals=watchlist,early_stopping_rounds=early_stopping_rounds
+                # print ('第'+str(i)+'份数据训练'+'模型完成')
+                # print('第'+str(i)+'份数据训练'+'模型开始预测第N折数据')
+                pre = model.predict(test_matrix, ntree_limit=model.best_ntree_limit).reshape(-1, class_num)
+                # print('第'+str(i)+'份数据训练'+'模型第N折数据预测完成')
+                train[test_index] = pre
+                # print('第'+str(i)+'份数据训练'+'模型第N折数据填充矩阵完成')
+                # print('第'+str(i)+'份数据训练'+'预测测试集')
+                test_pre[i, :] = model.predict(z, ntree_limit=model.best_ntree_limit).reshape(-1, class_num)
+                cv_scores.append(log_loss(te_y, pre))
+        elif clf_name in ["lgb"]:
+            # print('第'+str(i)+'份数据开始训练'+'模型')
+            train_matrix = clf.Dataset(tr_x, label=tr_y)
+            test_matrix = clf.Dataset(te_x, label=te_y)
+            # z = clf.Dataset(test_x, label=te_y)
+            # z=test_x
+            param = {
+                'boosting_type': 'gbdt',
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'num_leaves': 127,
+                'min_data_in_leaf': 200,
+                'learning_rate': 0.04,
+                'feature_fraction': 0.85,
+                'bagging_fraction': 0.92,
+                'bagging_freq': 5,
+                'verbose': 0
+            }
+            num_round = 3000
+            early_stopping_rounds = 50
+            # print('参数列表：')
+            print(param)
+            print('num_round = ' + str(num_round) + '   ' + 'early_stopping_rounds = ' + str(early_stopping_rounds))
+            if test_matrix:
+                model = clf.train(param, train_matrix,
+                                  num_round)  # valid_sets=test_matrix,early_stopping_rounds=early_stopping_rounds
+                # print ('第'+str(i)+'份数据训练'+'模型完成')
+                # print('第'+str(i)+'份数据训练'+'模型开始预测第N折数据')
+                pre = model.predict(te_x).reshape(-1, class_num)
+                # print('第'+str(i)+'份数据训练'+'模型第N折数据预测完成')
+                train[test_index] = pre
+                # print('第'+str(i)+'份数据训练'+'模型第N折数据填充矩阵完成')
+                # print('第'+str(i)+'份数据训练'+'预测测试集')
+                test_pre[i, :] = model.predict(test_x, num_iteration=model.best_iteration).reshape(-1, class_num)
+                cv_scores.append(log_loss(te_y, pre))
+        elif clf_name in ["nn"]:
+            from keras.layers import Dense, Dropout, BatchNormalization, SReLU
+            from keras.optimizers import SGD, RMSprop
+            from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+            from keras.utils import np_utils
+            from keras.regularizers import l2
+            from keras.models import Sequential
+            clf = Sequential()
+            clf.add(Dense(64, input_dim=tr_x.shape[1], activation="relu", W_regularizer=l2()))
+            # clf.add(SReLU())
+            # clf.add(Dropout(0.2))
+            clf.add(Dense(64, activation="relu", W_regularizer=l2()))
+            # clf.add(SReLU())
+            # clf.add(Dense(64, activation="relu", W_regularizer=l2()))
+            # model.add(Dropout(0.2))
+            clf.add(Dense(1, activation="sigmoid"))
+            clf.summary()
+            early_stopping = EarlyStopping(monitor='val_loss', patience=20)
+            reduce = ReduceLROnPlateau(min_lr=0.0002, factor=0.05)
+            clf.compile(optimizer="rmsprop", loss="binary_crossentropy")
+            clf.fit(tr_x, tr_y,
+                    batch_size=2560,
+                    nb_epoch=1000,
+                    validation_data=[te_x, te_y],
+                    callbacks=[early_stopping, reduce])
+            pre = clf.predict_proba(te_x)
+            train[test_index] = pre
+            test_pre[i, :] = clf.predict_proba(test_x)
+            cv_scores.append(log_loss(te_y, pre))
+        else:
+            raise IOError("Please add new clf.")
+        print ("%s now score is:" % clf_name, cv_scores)
+        with open("score.txt", "a") as f:
+            f.write("%s now score is:" % clf_name + str(cv_scores) + "\n")
+    test[:] = test_pre.mean(axis=0)
+    print ("%s_score_list:" % clf_name, cv_scores)
+    print ("%s_score_mean:" % clf_name, np.mean(cv_scores))
+    with open("score.txt", "a") as f:
+        f.write("%s_score_mean:" % clf_name + str(np.mean(cv_scores)) + "\n")
+    return train.reshape(-1, class_num), test.reshape(-1, class_num)
+
+
+def rf(x_train, y_train, x_valid):
+    randomforest = RandomForestClassifier(n_estimators=400, max_depth=15, n_jobs=-1, random_state=2017,
+                                          max_features="auto", verbose=1)
+    rf_train, rf_test = stacking(randomforest, x_train, y_train, x_valid, "rf")
+    return rf_train, rf_test, "rf"
+
+
+def ada(x_train, y_train, x_valid):
+    adaboost = AdaBoostClassifier(n_estimators=50, random_state=2017, learning_rate=0.01)
+    ada_train, ada_test = stacking(adaboost, x_train, y_train, x_valid, "ada")
+    return ada_train, ada_test, "ada"
+
+
+def gb(x_train, y_train, x_valid):
+    gbdt = GradientBoostingClassifier(learning_rate=0.1, n_estimators=30, subsample=0.8, random_state=2017, max_depth=5,
+                                      verbose=1)
+    gbdt_train, gbdt_test = stacking(gbdt, x_train, y_train, x_valid, "gb")
+    return gbdt_train, gbdt_test, "gb"
+
+
+def et(x_train, y_train, x_valid):
+    extratree = ExtraTreesClassifier(n_estimators=400, max_depth=15, max_features="auto", n_jobs=-1, random_state=2017,
+                                     verbose=1)
+    et_train, et_test = stacking(extratree, x_train, y_train, x_valid, "et")
+    return et_train, et_test, "et"
+
+
+def xgb(x_train, y_train, x_valid):
+    # print('开始训练')
+    xgb_train, xgb_test = stacking(xgboost, x_train, y_train, x_valid, "xgb")
+    return xgb_train, xgb_test, "xgb"
+
+
+def lgb(x_train, y_train, x_valid):
+    print (y_train.shape)
+    xgb_train, xgb_test = stacking(lightgbm, x_train, y_train, x_valid, "lgb")
+    return xgb_train, xgb_test, "lgb"
+
+
+def lr(x_train, y_train, x_valid):
+    print (y_train.shape)
+    x_train = np.log10(x_train + 1)
+    x_valid = np.log10(x_valid + 1)
+
+    where_are_nan = np.isnan(x_train)
+    where_are_inf = np.isinf(x_train)
+    x_train[where_are_nan] = 0
+    x_train[where_are_inf] = 0
+    where_are_nan = np.isnan(x_valid)
+    where_are_inf = np.isinf(x_valid)
+    x_valid[where_are_nan] = 0
+    x_valid[where_are_inf] = 0
+
+    x_train = x_train.drop(['appPlatform', 'haveBaby', 'telecomsOperator', 'marriageStatus', 'sitesetID', \
+                            'gender', 'education', 'connectionType', 'positionType', 'residence', 'creativeID', 'adID', \
+                            'camgaignID', 'advertiserID', 'appCategory', 'positionID', 'appID', 'hometown'],
+                           axis=1).values
+
+    x_valid = x_valid.drop(['appPlatform', 'haveBaby', 'telecomsOperator', 'marriageStatus', 'sitesetID', \
+                            'gender', 'education', 'connectionType', 'positionType', 'residence', 'creativeID', 'adID', \
+                            'camgaignID', 'advertiserID', 'appCategory', 'positionID', 'appID', 'hometown'],
+                           axis=1).values
+
+    scale = StandardScaler()
+    # scale=MinMaxScaler()
+    scale.fit(x_train)
+    x_train = scale.transform(x_train)
+    x_valid = scale.transform(x_valid)
+
+    logisticregression = LogisticRegression(n_jobs=-1, random_state=2017, C=0.1, max_iter=200)
+    lr_train, lr_test = stacking(logisticregression, x_train, y_train, x_valid, "lr")
+    return lr_train, lr_test, "lr"
+
+
+def nn(x_train, y_train, x_valid):
+    x_train = np.log10(x_train + 1)
+    x_valid = np.log10(x_valid + 1)
+
+    where_are_nan = np.isnan(x_train)
+    where_are_inf = np.isinf(x_train)
+    x_train[where_are_nan] = 0
+    x_train[where_are_inf] = 0
+    where_are_nan = np.isnan(x_valid)
+    where_are_inf = np.isinf(x_valid)
+    x_valid[where_are_nan] = 0
+    x_valid[where_are_inf] = 0
+
+    scale = StandardScaler()
+    # scale=MinMaxScaler()
+    scale.fit(x_train)
+    x_train = scale.transform(x_train)
+    x_valid = scale.transform(x_valid)
+    from keras.utils import np_utils
+    nn_train, nn_test = stacking("", x_train, y_train, x_valid, "nn")
+    return nn_train, nn_test, "nn"
+
+
+###########################################################################################################
+
+#####################################################获取数据##############################################
+
+###########################################################################################################
+def get_app_mis(cnt):
+    data1 = pd.read_csv('./cache/26app.csv')
+    data2 = pd.read_csv('./cache/27app.csv')
+    data3 = pd.read_csv('./cache/28app.csv')
+    data = pd.concat([data1, data2, data3], ignore_index=True)
+    data = data.sort_values(by='ratio', ascending=True)
+    print(data)
+    data = data.drop_duplicates(['appID'])
+    return data[data.ratio >= cnt][['appID']]
+
+
+def get_data():
+    train21 = pd.read_csv('./train/final_21000000.csv')
+    train21 = BayesianSmoothing(train21.copy())
+
+    train22 = pd.read_csv('./train/final_22000000.csv')
+    train22 = BayesianSmoothing(train22.copy())
+
+    train23 = pd.read_csv('./train/final_23000000.csv')
+    train23 = BayesianSmoothing(train23.copy())
+
+    train24 = pd.read_csv('./train/final_24000000.csv')
+    train24 = BayesianSmoothing(train24.copy())
+
+    train25 = pd.read_csv('./train/final_25000000.csv')
+    train25 = BayesianSmoothing(train25.copy())
+
+    data3 = pd.read_csv('./train/final_26000000.csv')
+    data3 = BayesianSmoothing(data3.copy())
+
+    data4 = pd.read_csv('./train/final_27000000.csv')
+    data4 = BayesianSmoothing(data4.copy())
+
+    train7 = pd.read_csv('./train/final_28000000.csv')
+    train7 = BayesianSmoothing(train7.copy())
+
+    train8 = pd.read_csv('./train/final_29000000.csv')
+    train8 = BayesianSmoothing(train8.copy())
+
+    data30 = pd.read_csv('./train/final_30000000.csv')
+    data30 = BayesianSmoothing(data30.copy())
+
+    ac = get_app_mis(0.10)
+    data30 = data30[~data30.appID.isin(ac['appID'])]
+    print(len(data30))
+    print(data30[data30.appID.isin(ac)])
+
+    train = pd.concat([train21, train22, train23, train24, train25, data3, data4, train7, train8, data30],
+                      ignore_index=True)
+
+    valid = pd.read_csv('./train/final_31000000.csv')
+    valid = BayesianSmoothing(valid.copy())
+
+    x_train = train.drop(['label', 'conversionTime', 'clickTime'], axis=1).values
+    y_train = train['label']
+    x_valid = valid.drop(['label', 'instanceID', 'clickTime'], axis=1).values
+
+    where_are_nan = np.isnan(x_train)
+    where_are_inf = np.isinf(x_train)
+    x_train[where_are_nan] = 0
+    x_train[where_are_inf] = 0
+    where_are_nan = np.isnan(x_valid)
+    where_are_inf = np.isinf(x_valid)
+    x_valid[where_are_nan] = 0
+    x_valid[where_are_inf] = 0
+
+    # x_train = pd.DataFrame(x_train)
+    # y_train = pd.DataFrame(y_train)
+    # x_valid = pd.DataFrame(x_valid)
+    return x_train, y_train, x_valid, train, valid
+
+
+if __name__ == "__main__":
+    np.random.seed(201706)
+    print('start reading data...')
+    x_train, y_train, x_valid, train, valid = get_data()
+    print('data read finished...')
+    folds = 5
+    seed = 201706
+    kf = KFold(x_train.shape[0], n_folds=folds, shuffle=True, random_state=seed)
+
+    #############################################选择模型###############################################
+    clf_list = [lgb]
+    column_list = []
+    train_data_list = []
+    test_data_list = []
+    x = 0
+    for clf in clf_list:
+        x = x + 1
+        # print('随机种子为'+str(x+2017)+'    '+'进行第'+str(x)+'个基模型计算')
+        train_data, test_data, clf_name = clf(x_train, y_train, x_valid)
+        train_data_list.append(train_data)
+        test_data_list.append(test_data)
+        if "reg" in clf_name:
+            ind_num = 1
+        else:
+            ind_num = 1
+        for ind in range(ind_num):
+            column_list.append("ori_%s_%s" % (clf_name, ind))
+
+    train = np.concatenate(train_data_list, axis=1)
+    test = np.concatenate(test_data_list, axis=1)
+
+    train = pd.DataFrame(train)
+    train.columns = column_list
+    train["label"] = pd.Series(y_train)
+
+    test = pd.DataFrame(test)
+    test.columns = column_list
+
+    train.to_csv("./cache/train_stacking_lgb_10.csv", index=None)
+    test.to_csv("./cache/test_stacking_lgb_10.csv", index=None)
+    # print('完成')
+
